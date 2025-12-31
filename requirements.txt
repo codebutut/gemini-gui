@@ -1,0 +1,7 @@
+PyQt6
+google-genai
+protobuf
+google-api-core
+google-auth
+markdown
+Pygments
