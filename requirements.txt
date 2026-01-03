@@ -5,3 +5,6 @@ google-api-core
 google-auth
 markdown
 Pygments
+pandas
+markdown-it-py
+mistune

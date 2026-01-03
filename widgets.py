@@ -1,5 +1,6 @@
 import re
 import markdown
+from markdown_it import MarkdownIt  # FIX: Added for robust parsing
 from typing import Optional
 
 from PyQt6.QtWidgets import (
@@ -185,8 +186,13 @@ class CodeBlock(QFrame):
     def adjust_height(self):
         """Auto-resize based on content line count."""
         lines = self.code.count('\n') + 1
-        # Approximate height: Header (30) + (Lines * LineHeight) + Padding
-        line_height = 18
+        
+        # FIX: Use QFontMetrics to get accurate line height for the current font.
+        # This prevents clipping if the system font is larger than expected.
+        fm = self.editor.fontMetrics()
+        line_height = fm.lineSpacing() 
+        
+        # Header (35) + Content + Padding (10)
         height = 35 + (lines * line_height) + 10
         self.setFixedHeight(min(height, 600)) # Cap at 600px
 
@@ -222,21 +228,38 @@ class MessageBubble(QFrame):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(5)
 
-        # 1. Parse Markdown and Extract Code Blocks
-        # We split text by code blocks ```lang ... ```
-        # This regex splits by code blocks but keeps delimiters so we can process chunks
-        parts = re.split(r'(```[\s\S]*?```)', self.raw_text)
+        # --- FIX: Use markdown-it-py for robust parsing ---
+        # This handles nested backticks and complex structures correctly.
+        md = MarkdownIt()
+        tokens = md.parse(self.raw_text)
+        
+        # We need the raw lines to extract text chunks accurately
+        lines = self.raw_text.splitlines(keepends=True)
+        last_line_idx = 0
 
-        for part in parts:
-            if part.startswith("```") and part.endswith("```"):
-                # It's a code block
-                self._add_code_block(part, layout)
-            else:
-                # It's normal text (Markdown)
-                if part.strip():
-                    self._add_markdown_text(part, layout)
+        for token in tokens:
+            if token.type == 'fence': # 'fence' indicates a code block
+                start_line, end_line = token.map
+                
+                # 1. Render Markdown Text occurring BEFORE this code block
+                if start_line > last_line_idx:
+                    text_chunk = "".join(lines[last_line_idx:start_line])
+                    if text_chunk.strip():
+                        self._add_markdown_text(text_chunk, layout)
+                
+                # 2. Render the Code Block
+                # token.content holds the code, token.info holds the language
+                self._add_code_block(token.content, token.info, layout)
+                
+                last_line_idx = end_line
 
-        # 2. Add Toolbar (Copy / Regenerate) if it's the model
+        # 3. Render any remaining text after the last code block
+        if last_line_idx < len(lines):
+            text_chunk = "".join(lines[last_line_idx:])
+            if text_chunk.strip():
+                self._add_markdown_text(text_chunk, layout)
+
+        # Add Toolbar (Copy / Regenerate) if it's the model
         if not self.is_user:
             self._add_toolbar(layout)
 
@@ -257,25 +280,19 @@ class MessageBubble(QFrame):
         
         layout.addWidget(lbl)
 
-    def _add_code_block(self, raw_block: str, layout: QVBoxLayout):
+    def _add_code_block(self, code_content: str, language: str, layout: QVBoxLayout):
         """Creates a CodeBlock widget."""
-        # Strip backticks
-        content = raw_block.strip("`")
-        
-        # Extract language
-        first_newline = content.find('\n')
-        if first_newline != -1:
-            language = content[:first_newline].strip()
-            code = content[first_newline+1:] # Don't strip trailing here to preserve formatting
+        # token.content usually includes a trailing newline, trim it for display
+        if code_content.endswith('\n'):
+            code = code_content[:-1]
         else:
+            code = code_content
+
+        # Fallback if language is empty
+        if not language:
             language = "text"
-            code = content
 
-        # Remove the very last newline if it exists (artifact of splitting)
-        if code.endswith('\n'):
-            code = code[:-1]
-
-        block = CodeBlock(code, language, self.theme_mode)
+        block = CodeBlock(code, language.strip(), self.theme_mode)
         layout.addWidget(block)
 
     def _add_toolbar(self, layout: QVBoxLayout):
@@ -303,10 +320,17 @@ class MessageBubble(QFrame):
         """Converts Markdown to basic HTML for QLabel."""
         # Use Python-Markdown for robust conversion
         try:
-            html = markdown.markdown(text)
+            # FIX: Added 'tables' extension to support Markdown table rendering
+            html = markdown.markdown(text, extensions=['tables'])
+            
             # Style adjustments for Qt
             link_color = "#4da6ff" if self.theme_mode == "Dark" else "#0969da"
             html = html.replace('<a href=', f'<a style="color: {link_color}; text-decoration: none;" href=')
+            
+            # FIX: Add HTML attributes to tables because QLabel doesn't default to showing borders
+            if "<table>" in html:
+                html = html.replace("<table>", '<table border="1" cellspacing="0" cellpadding="5" width="100%">')
+
             return html
         except Exception:
             # Fallback for simple formatting if lib fails
@@ -321,19 +345,17 @@ class MessageBubble(QFrame):
         
         if clean:
             # 1. Convert Raw Markdown to HTML
-            # We use the markdown library to handle the conversion first
             try:
-                html_content = markdown.markdown(self.raw_text)
+                # FIX: Also use 'tables' here so copying "Clean Text" preserves table data structure if possible
+                html_content = markdown.markdown(self.raw_text, extensions=['tables'])
                 
                 # 2. Use QTextDocument to convert HTML -> Plain Text
-                # This automatically handles bold, headers, list bullets, etc. cleanly
                 doc = QTextDocument()
                 doc.setHtml(html_content)
                 clean_text = doc.toPlainText()
                 
                 clipboard.setText(clean_text.strip())
             except Exception:
-                # Fallback if something fails
                 clipboard.setText(self.raw_text)
         else:
             clipboard.setText(self.raw_text)
